@@ -72,14 +72,23 @@ Accepts the following options:
 ;;WebSocket server
 
 (defn handler
-  [connection-chan in-thunk out-thunk]
+  [connection-chan in-thunk out-thunk auth-handler]
   (proxy [WebSocketHandler] []
     (doWebSocketConnect [request response]
-      (let [in (in-thunk) out (out-thunk)]
-        (->WebSocket$OnTextMessage connection-chan
-                                   {:request (servlet/build-request-map request)
-                                    :in in
-                                    :out out})))))
+      (let [ring-request (servlet/build-request-map request)
+            ring-response (if auth-handler
+                            (auth-handler request)
+                            {:status 200})
+            status (:status ring-response)
+            session (:session ring-response)]
+        (when (= status 200)
+          (let [in (in-thunk)
+                out (out-thunk)
+                decorated-ring-request (assoc ring-request :session session)]
+            (->WebSocket$OnTextMessage connection-chan
+                                       {:request decorated-ring-request
+                                        :in      in
+                                        :out     out})))))))
 
 (defn configurator
   "Returns a Jetty configurator that configures server to listen for websocket connections and put request maps on `connection-chan`.
@@ -96,13 +105,14 @@ Accepts the following options:
   :path - the string path at which the server should listen for websocket connections (default: \"/\")
   :in   - a zero-arg function called to create the :in port for each new websocket connection (default: a non-blocking dropping channel)
   :out  - a zero-arg function called to create the :out port for each new websocket connection (default: a non-blocking dropping channel)
+  :auth-handler - a ring handler that will be run with the request, rejecting the user on a non-200 response (default: nil)
 "
   ([connection-chan]
      (configurator connection-chan {}))
-  ([connection-chan {:keys [in out path]
-                     :or {in default-chan, out default-chan, path "/"}}]
+  ([connection-chan {:keys [in out path auth-handler]
+                     :or   {in default-chan, out default-chan, path "/" auth-handler nil}}]
      (fn [server]
-       (let [ws-handler (handler connection-chan in out)
+       (let [ws-handler (handler connection-chan in out auth-handler)
              existing-handler (.getHandler server)
              contexts (doto (ContextHandlerCollection.)
                         (.setHandlers (into-array [(doto (ContextHandler. path)
